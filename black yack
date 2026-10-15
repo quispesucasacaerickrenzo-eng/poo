@@ -1,0 +1,353 @@
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <ctime>
+#include <fstream>
+#include <iostream>
+#include <random>
+#include <set>
+#include <sstream>
+#include <string>
+#include <vector>
+using namespace std;
+
+const int NUM_CARTAS = 52, MIN_OBJETIVO = 10, MAX_OBJETIVO = 200;
+
+// ======================================
+// CONFIGURACION (lee configuracion.txt)
+// ======================================
+class Configuracion {
+	int objetivo_ = 21;
+	vector<string> palos_ = {"Treboles", "Diamantes", "Corazones", "Espadas"};
+	
+	static string recortar(const string& s) {
+		size_t a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
+		return a == string::npos ? "" : s.substr(a, b - a + 1);
+	}
+	
+public:
+		int objetivo() const { return objetivo_; }
+		const string& palo(int i) const { return palos_[i]; }
+		
+		string palosTexto(const string& sep = ",") const {
+			string s;
+			for (const string& p : palos_) s += (s.empty() ? "" : sep) + p;
+			return s;
+		}
+		
+		// Cambia un valor. Devuelve false (sin cambiar nada) si no es valido.
+		bool poner(const string& clave, const string& valor) {
+			if (clave == "objetivo") {
+				int n = atoi(valor.c_str());
+				if (n < MIN_OBJETIVO || n > MAX_OBJETIVO) return false;
+				objetivo_ = n;
+				return true;
+			}
+			if (clave == "palos") {
+				vector<string> p;
+				string nombre;
+				stringstream ss(valor);
+				while (getline(ss, nombre, ',')) p.push_back(recortar(nombre));
+				if (p.size() != 4 || set<string>(p.begin(), p.end()).size() != 4 || count(p.begin(), p.end(), "") > 0)
+					return false;
+				palos_ = p;
+				return true;
+			}
+			return false;
+		}
+		
+		static Configuracion cargar() {
+			Configuracion c;
+			ifstream f("configuracion.txt");
+			if (!f) {   // si no existe, se crea con los valores por defecto para que el usuario lo edite
+				ofstream nuevo("configuracion.txt");
+				nuevo << "# Puntaje a alcanzar (entre 10 y 200). Gana quien se acerque mas sin pasarse.\n"
+					<< "objetivo=21\n# Nombres de los 4 palos separados por comas. Ej: Gato,Perro,Flor,Abeja\n"
+					<< "palos=" << c.palosTexto() << "\n";
+				return c;
+			}
+			string linea;
+			while (getline(f, linea)) {
+				size_t igual = linea.find('=');
+				if (linea.empty() || linea[0] == '#' || igual == string::npos) continue;
+				if (!c.poner(recortar(linea.substr(0, igual)), recortar(linea.substr(igual + 1))))
+					cout << "Aviso: linea invalida en configuracion.txt, se ignora: " << linea << "\n";
+			}
+			return c;
+		}
+};
+
+// ======================================
+// CARTA
+// ======================================
+class Carta {
+	int id_;   // 0 a 51: id / 13 = palo, id % 13 + 1 = rango (1 = As, 11 = J, 12 = Q, 13 = K)
+public:
+	explicit Carta(int id) : id_(id) {}
+	int id() const { return id_; }
+	int rango() const { return id_ % 13 + 1; }
+	int palo() const { return id_ / 13; }
+	int valor() const { return rango() == 1 ? 11 : min(rango(), 10); }
+	
+	string texto(const Configuracion& cfg) const {
+		static const char* const nombres[] = {"As", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"};
+		return string(nombres[rango() - 1]) + " de " + cfg.palo(palo());
+	}
+};
+
+// ======================================
+// BARAJA
+// ======================================
+class Baraja {
+	vector<int> mazo_;
+	int sig_ = 0;   // posicion de la siguiente carta a sacar
+	
+public:
+	Baraja() {
+		for (int i = 0; i < NUM_CARTAS; i++) mazo_.push_back(i);
+		mt19937 gen(random_device{}() ^ (unsigned)time(0));
+		shuffle(mazo_.begin(), mazo_.end(), gen);
+	}
+	
+	bool hayCartas() const { return sig_ < NUM_CARTAS; }
+	int sacadas() const { return sig_; }
+	Carta sacar() { return Carta(mazo_[sig_++]); }
+	bool salio(int id) const { return find(mazo_.begin(), mazo_.end(), id) - mazo_.begin() < sig_; }
+	
+	void guardar(ostream& o) const {
+		o << sig_;
+		for (int id : mazo_) o << ' ' << id;
+		o << '\n';
+	}
+	
+	bool cargar(istream& i) {
+		vector<int> m(NUM_CARTAS);
+		int s = 0;
+		i >> s;
+		for (int& id : m) i >> id;
+		if (!i || s < 0 || s > NUM_CARTAS) return false;
+		vector<int> orden = m;
+		sort(orden.begin(), orden.end());
+		for (int k = 0; k < NUM_CARTAS; k++)   // tiene que ser una mezcla de 0..51 sin repetidos
+			if (orden[k] != k) return false;
+		mazo_ = m;
+		sig_ = s;
+		return true;
+	}
+};
+
+// ======================================
+// JUGADOR
+// ======================================
+class Jugador {
+	int numero_;
+	bool activo_ = true;
+	vector<Carta> mano_;
+	
+public:
+	explicit Jugador(int numero) : numero_(numero) {}
+	int numero() const { return numero_; }
+	bool activo() const { return activo_; }
+	const vector<Carta>& mano() const { return mano_; }
+	void recibir(const Carta& c) { mano_.push_back(c); }
+	void plantarse() { activo_ = false; }
+	
+	int puntos(int objetivo) const {
+		int total = 0, ases = 0;
+		for (const Carta& c : mano_) {
+			total += c.valor();
+			ases += (c.rango() == 1);
+		}
+		for (; total > objetivo && ases > 0; ases--) total -= 10;   // el As pasa de valer 11 a 1
+		return total;
+	}
+	
+	string texto(const Configuracion& cfg) const {
+		string s;
+		for (const Carta& c : mano_) s += (s.empty() ? "" : ", ") + c.texto(cfg);
+		return s;
+	}
+	
+	void guardar(ostream& o) const {
+		o << activo_ << ' ' << mano_.size();
+		for (const Carta& c : mano_) o << ' ' << c.id();
+		o << '\n';
+	}
+	
+	bool cargar(istream& i) {
+		int a = 0, n = 0;
+		i >> a >> n;
+		if (!i || (a != 0 && a != 1) || n < 0 || n > NUM_CARTAS) return false;
+		activo_ = (a == 1);
+		mano_.clear();
+		for (int k = 0; k < n; k++) {
+			int id = -1;
+			i >> id;
+			if (!i || id < 0 || id >= NUM_CARTAS) return false;
+			mano_.push_back(Carta(id));
+		}
+		return true;
+	}
+};
+
+// ======================================
+// PARTIDA
+// ======================================
+class Partida {
+	Configuracion config_;
+	Baraja baraja_;
+	vector<Jugador> jugadores_;
+	int turnoInicial_ = 0;   // al recuperar una partida, sigue quien tenia el turno
+	
+	bool hayActivos() const {
+		return any_of(jugadores_.begin(), jugadores_.end(), [](const Jugador& j) { return j.activo(); });
+	}
+	
+	char pedir() const {
+		string s;
+		while (cout << "[P] pedir carta, [S] plantarse, [G] guardar: ", getline(cin, s)) {
+			char c = s.empty() ? ' ' : (char)toupper((unsigned char)s[0]);
+			if (c == 'P' || c == 'S' || c == 'G') return c;
+		}
+		return 'S';   // se acabo la entrada
+	}
+	
+	void guardar(int turno) const {
+		ofstream f("partida.txt");
+		f << config_.objetivo() << '\n' << config_.palosTexto() << '\n';
+		baraja_.guardar(f);
+		f << turno << ' ' << jugadores_.size() << '\n';
+		for (const Jugador& j : jugadores_) j.guardar(f);
+		cout << (f ? "Partida guardada.\n" : "Error al guardar.\n");
+	}
+	
+	void turno(int i) {
+		Jugador& j = jugadores_[i];
+		int obj = config_.objetivo();
+		cout << "\n--- Turno del Jugador " << j.numero() << " ---\nCartas: " << j.texto(config_)
+			<< "\nPuntos: " << j.puntos(obj) << "\n";
+		
+		while (j.activo() && j.puntos(obj) < obj) {
+			char op = pedir();
+			if (op == 'G') { guardar(i); continue; }   // guardar no gasta el turno
+			if (op == 'S' || !baraja_.hayCartas()) {
+				j.plantarse();
+				cout << "Te plantas con " << j.puntos(obj) << " puntos.\n";
+				return;
+			}
+			Carta c = baraja_.sacar();
+			j.recibir(c);
+			cout << "Recibes: " << c.texto(config_) << " (" << j.puntos(obj) << " puntos)\n";
+			break;
+		}
+		if (j.puntos(obj) >= obj) {   // llego al objetivo o se paso
+			j.plantarse();
+			cout << (j.puntos(obj) > obj ? "Te pasaste de " : "Llegaste a ") << obj << ".\n";
+		}
+	}
+	
+	void resultado() const {
+		int obj = config_.objetivo(), mejor = -1;
+		cout << "\n===== RESULTADO FINAL =====\n";
+		for (const Jugador& j : jugadores_) {
+			int p = j.puntos(obj);
+			cout << "Jugador " << j.numero() << ": " << j.texto(config_) << " -> " << p << " puntos"
+				<< (p > obj ? " (se paso)" : "") << "\n";
+			if (p <= obj) mejor = max(mejor, p);
+		}
+		if (mejor < 0) { cout << "\nTodos se pasaron. Nadie gana.\n"; return; }
+		cout << "\nGanador(es) con " << mejor << " puntos:";
+		for (const Jugador& j : jugadores_)
+			if (j.puntos(obj) == mejor) cout << " Jugador " << j.numero();
+		cout << "\n";
+	}
+	
+public:
+		explicit Partida(const Configuracion& config) : config_(config) {}
+		
+		void nueva(int n) {
+			for (int i = 1; i <= n; i++) jugadores_.push_back(Jugador(i));
+			for (int ronda = 0; ronda < 2; ronda++)   // 2 cartas a cada jugador
+				for (Jugador& j : jugadores_) j.recibir(baraja_.sacar());
+		}
+		
+		bool recuperar() {
+			ifstream f("partida.txt");
+			if (!f) { cout << "No existe una partida guardada.\n"; return false; }
+			
+			// Se lee todo en variables temporales y solo si es valido se aplica
+			Configuracion c;
+			Baraja b;
+			vector<Jugador> js;
+			string lineaObjetivo, lineaPalos;
+			int turno = -1, n = 0;
+			getline(f, lineaObjetivo);
+			getline(f, lineaPalos);
+			bool ok = c.poner("objetivo", lineaObjetivo) && c.poner("palos", lineaPalos) && b.cargar(f) &&
+				(f >> turno >> n) && n >= 2 && n <= 4 && turno >= 0 && turno < n;
+			for (int i = 1; ok && i <= n; i++) {
+				Jugador j(i);
+				ok = j.cargar(f);
+				js.push_back(j);
+			}
+			
+			// Las cartas de las manos deben ser exactamente las que ya salieron de la baraja
+			vector<bool> vista(NUM_CARTAS, false);
+			int total = 0;
+			for (size_t i = 0; ok && i < js.size(); i++)
+				for (const Carta& carta : js[i].mano()) {
+					ok = ok && !vista[carta.id()] && b.salio(carta.id());
+					vista[carta.id()] = true;
+					total++;
+			}
+				if (!ok || total != b.sacadas()) { cout << "Archivo de partida invalido.\n"; return false; }
+				
+				config_ = c;
+				baraja_ = b;
+				jugadores_ = js;
+				turnoInicial_ = turno;
+				cout << "Partida recuperada (se usan las reglas con las que se guardo).\n";
+				return true;
+		}
+		
+		void jugar() {
+			cout << "\nObjetivo: " << config_.objetivo() << " puntos (gana quien se acerque mas sin pasarse)\n"
+				<< "Palos: " << config_.palosTexto(", ") << "\n";
+			int inicio = turnoInicial_;
+			while (hayActivos()) {
+				for (int i = inicio; i < (int)jugadores_.size(); i++)
+					if (jugadores_[i].activo()) turno(i);
+				inicio = 0;
+			}
+			resultado();
+		}
+};
+
+// ======================================
+// PROGRAMA PRINCIPAL
+// ======================================
+// Pide un numero entre min y max. Devuelve -1 si se acaba la entrada.
+int leer(const string& mensaje, int min, int max) {
+	string s;
+	while (cout << mensaje, getline(cin, s)) {
+		int n = atoi(s.c_str());
+		if (n >= min && n <= max) return n;
+	}
+	return -1;
+}
+
+int main() {
+	Partida partida(Configuracion::cargar());
+	cout << "===== BLACKJACK =====\n1. Nueva partida\n2. Recuperar partida\n";
+	int op = leer("Elige: ", 1, 2);
+	
+	if (op == 1) {
+		int n = leer("Cuantos jugadores (2-4)? ", 2, 4);
+		if (n < 0) return 0;
+		partida.nueva(n);
+	} else if (op != 2 || !partida.recuperar()) {
+		return 0;
+	}
+	partida.jugar();
+	return 0;
+}
